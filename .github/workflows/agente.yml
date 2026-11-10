@@ -1,0 +1,28 @@
+name: Agente Badminton
+on:
+  workflow_dispatch:          # lancio a mano (Actions > Run workflow) o da cron-job.org
+    inputs:
+      prova:
+        description: "Solo prova (non scrive su Notion né sulla pagina web)"
+        type: boolean
+        default: false
+concurrency:
+  group: agente-badminton     # mai due esecuzioni insieme
+  cancel-in-progress: false
+jobs:
+  aggiorna:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: Leggi i risultati BWF e scrivi su Notion
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
+          MAPPA_TOKEN: ${{ secrets.MAPPA_TOKEN }}
+          DRY_RUN: ${{ inputs.prova }}
+        run: python scrape.py
