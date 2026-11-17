@@ -1,10 +1,13 @@
 name: Agente Badminton
 
-# Repo agente-badminton, file .github/workflows/agente.yml (versione 2.0 del 17/11/2026, scheda 32).
+# Repo agente-badminton, file .github/workflows/agente.yml (versione 2.1 del 17/11/2026, scheda 33).
 # Parte in due modi:
 #   - a mano: Actions -> Agente Badminton -> Run workflow (con le scelte qui sotto);
 #   - ogni mattina da cron-job.org, con il corpo {"ref":"main"}: valgono i valori predefiniti,
 #     cioè lancio vero (prova = no) e modalità "aggiungi". Su cron-job.org non serve cambiare nulla.
+# NOVITÀ della versione 2.1: il LUNEDÌ (ora italiana), alla fine del lancio vero, avvia
+# "ELO Badminton" nel repo map-q-la28, che ricalcola l'ELO, lo scrive in Athletes (ELO Bad)
+# e fa ripubblicare la pagina performance. Negli altri giorni l'ELO non parte.
 on:
   workflow_dispatch:
     inputs:
@@ -17,6 +20,10 @@ on:
         type: choice
         options: ["aggiungi", "completa"]
         default: "aggiungi"
+      avvia_elo:
+        description: "Avvia comunque il calcolo ELO alla fine (di norma parte da solo solo il lunedì)"
+        type: boolean
+        default: false
 
 concurrency:
   group: agente-badminton     # mai due esecuzioni insieme: il secondo lancio aspetta il primo
@@ -53,3 +60,39 @@ jobs:
             rapporto_badminton.txt
             badminton.json
           if-no-files-found: ignore
+
+      # ------------------------------------------------------------------ NOVITÀ della versione 2.1
+      - name: Il lunedì avvia il calcolo ELO (workflow "ELO Badminton" nel repo map-q-la28)
+        # Quando parte:
+        #   - solo nei lanci veri: una prova non ha scritto nulla in Notion. format('{0}', ...) trasforma
+        #     il valore in testo, così la condizione funziona sia a mano sia da cron-job.org;
+        #   - anche se l'agente ha avuto errori parziali: l'ELO si ricalcola da zero sulle righe
+        #     presenti in Notion. "!cancelled()" = sempre, tranne se il lancio è stato annullato a mano.
+        if: ${{ !cancelled() && format('{0}', inputs.prova) != 'true' }}
+        env:
+          # stesso token che l'agente usa già per pubblicare badminton.json:
+          # ha "Actions: Read and write" sul repo map-q-la28 (scheda 12 §5)
+          GH_TOKEN: ${{ secrets.MAPPA_TOKEN }}
+          FORZA: ${{ inputs.avvia_elo }}
+        run: |
+          # giorno della settimana in Italia: 1 = lunedì ... 7 = domenica
+          giorno=$(TZ=Europe/Rome date +%u)
+          if [ "$giorno" != "1" ] && [ "$FORZA" != "true" ]; then
+            echo "Oggi non è lunedì: il calcolo ELO non parte (si può forzare con 'Avvia comunque il calcolo ELO')."
+            exit 0
+          fi
+          if [ -z "$GH_TOKEN" ]; then
+            echo "ATTENZIONE: il segreto MAPPA_TOKEN non c'è, quindi il calcolo ELO non parte."
+            echo "Lancialo a mano: repo map-q-la28 -> Actions -> ELO Badminton -> Run workflow, senza spunta su solo_prova."
+            exit 1
+          fi
+          # "elo-badminton.yml" è il nome del FILE del workflow (più sicuro del titolo, che si può cambiare);
+          # -f solo_prova=false = lancio vero: scrive ELO Bad in Athletes e salva badminton-elo.json.
+          if gh workflow run elo-badminton.yml --repo "${{ github.repository_owner }}/map-q-la28" -f solo_prova=false; then
+            echo "Ho avviato 'ELO Badminton' nel repo map-q-la28: il calcolo dura di solito pochi minuti."
+          else
+            echo "ATTENZIONE: non sono riuscito ad avviare 'ELO Badminton'."
+            echo "Cause probabili: al token MAPPA_TOKEN manca 'Actions: Read and write' su map-q-la28, oppure è scaduto."
+            echo "Intanto lancia 'ELO Badminton' a mano, senza spunta su solo_prova."
+            exit 1
+          fi
