@@ -1,15 +1,42 @@
-"""Agente Badminton
+"""Agente Badminton · versione 2.0 (17/11/2026, scheda 32)
 
-Legge i risultati dei tornei BWF World Tour Super 300 e Super 500 e li scrive
-in un database Notion. Poi prepara badminton.json per la pagina web e lo
-pubblica sul repository della mappa (map-q-la28).
+Legge i risultati dei tornei BWF e li scrive nel database Notion «🏸 Agente Badminton».
+Poi prepara badminton.json per la pagina web badminton.html e lo pubblica sul
+repository della mappa (map-q-la28).
 
-Variabili (i "Secrets" di GitHub):
+Tornei letti, dalla stagione 2026:
+  - HSBC BWF World Tour: Super 300, Super 500, Super 750, Super 1000 e World Tour Finals
+    (delle Finals anche gli incontri dei gironi, scritti con Turno = "Group Stage");
+  - Mondiali individuali (BWF World Championships).
+Esclusi: qualificazioni, gare a squadre, campionati e Giochi continentali, juniores,
+senior (over), para-badminton.
+
+NOVITÀ della versione 2.0:
+  1. nuove categorie: Super 750, Super 1000, World Tour Finals, Mondiali;
+  2. nuove colonne ID BWF 1 (vincitore) e ID BWF 2 (sconfitto) con il codice BWF del giocatore;
+     nei doppi i due codici in ordine crescente, separati da "/" (es. "65267/89426"),
+     così la stessa coppia ha sempre lo stesso codice, in qualunque ordine la dia il sito;
+  3. lettura del database divisa in 6 ricerche (una per Disciplina + una di controllo),
+     perché l'API di Notion non restituisce più di 10.000 righe per ricerca (schede 29 e 30);
+  4. modalità "completa": scrive ID BWF 1 / ID BWF 2 nelle righe già presenti che non li hanno.
+     Solo nelle celle vuote: nessun dato viene sovrascritto o cancellato;
+  5. un torneo con stato "finished" non viene più scambiato per annullato (era il caso
+     dell'All England 2026); annullato = la parola "cancel" nello stato o nel nome;
+  6. la prova (DRY_RUN) legge anche Notion, senza scrivere, e dice quante righe scriverebbe;
+  7. limite di tempo: passati TEMPO_MAX_MINUTI smette di scrivere e chiude in ordine;
+     il lancio successivo riprende da dove si era fermato, senza doppioni.
+La pagina web badminton.html per ora mostra solo Super 300 e 500 (vedi CATEGORIE_WEB):
+il file badminton.json resta quindi identico a prima.
+
+Variabili (i "Secrets" e gli input di GitHub):
   NOTION_TOKEN        token della connessione Notion (la stessa dello squash)
   NOTION_DATABASE_ID  link o codice del database "Agente Badminton"
   MAPPA_TOKEN         token GitHub che può scrivere su map-q-la28 (facoltativo:
                       senza, Notion si aggiorna lo stesso ma la pagina web no)
-  DRY_RUN=true        prova: stampa i dati trovati senza scrivere nulla
+  DRY_RUN=true        prova: legge BWF e Notion e stampa cosa farebbe, senza scrivere nulla
+  MODALITA            "aggiungi" (predefinita) = solo incontri nuovi;
+                      "completa" = in più scrive gli ID BWF nelle righe già presenti
+  TEMPO_MAX_MINUTI    dopo quanti minuti smettere di scrivere (predefinito 110)
 """
 import base64
 import json
@@ -17,21 +44,48 @@ import os
 import re
 import sys
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 
 import requests
 
 # ------------------------------------------------------------- impostazioni
 ANNO_INIZIO = 2026          # da quale stagione partire
-CATEGORIE = {11: "Super 500", 12: "Super 300"}   # codici BWF delle categorie
+
+# Codici BWF delle categorie da chiedere al sito (elenco /vue-tournament-categories,
+# verificato il 17/11/2026): 2 = Grade 1 individuali (Mondiali), 8 = World Tour Finals,
+# 9 = Super 1000, 10 = Super 750, 11 = Super 500, 12 = Super 300.
+CODICI_CATEGORIA = [2, 8, 9, 10, 11, 12]
+
+# Nome della categoria sul sito BWF -> valore della colonna "Categoria" in Notion.
+# (Le opzioni nuove della colonna Categoria le crea Notion da solo alla prima scrittura.)
+CATEGORIE = {
+    "HSBC BWF World Tour Finals": "World Tour Finals",
+    "HSBC BWF World Tour Super 1000": "Super 1000",
+    "HSBC BWF World Tour Super 750": "Super 750",
+    "HSBC BWF World Tour Super 500": "Super 500",
+    "HSBC BWF World Tour Super 300": "Super 300",
+    "Grade 1 - Individual Tournaments": "Mondiali",
+}
+# Nella categoria "Grade 1 - Individual Tournaments" si tengono solo i Mondiali senior
+# (es. "BWF World Championships 2026"), non i Mondiali over, juniores o para.
+PAROLE_MONDIALI = "world championships"
+PAROLE_ESCLUSE = ("senior", "junior", "para")
+
+# Categorie mostrate dalla pagina badminton.html (per ora solo Super 300 e 500, come prima)
+CATEGORIE_WEB = {"Super 500", "Super 300"}
+
 MAPPA_REPO = "vier80/map-q-la28"
 MAPPA_FILE = "badminton.json"
 MAPPA_WORKFLOW = "aggiorna.yml"
 PAUSE_SECONDS = 1.0         # pausa tra una richiesta e l'altra al sito BWF
+PAUSA_NOTION = 0.35         # pausa tra una scrittura e l'altra su Notion
+
+# Una ricerca dell'API Notion restituisce al massimo 10.000 righe (scoperto il 16/11/2026, scheda 28 §3)
+LIMITE_NOTION = 10000
 
 API = "https://extranet-lv.bwfbadminton.com/api"
 WEB_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; AgenteBadminton/1.0; uso personale)",
+    "User-Agent": "Mozilla/5.0 (compatible; AgenteBadminton/2.0; uso personale)",
     "Accept": "application/json, text/plain, */*",
     "Origin": "https://bwfworldtour.bwfbadminton.com",
     "Referer": "https://bwfworldtour.bwfbadminton.com/",
@@ -43,6 +97,11 @@ _found = re.search(r"[0-9a-fA-F]{32}", _raw_id)
 DATABASE_ID = _found.group(0) if _found else _raw_id
 MAPPA_TOKEN = os.getenv("MAPPA_TOKEN", "").strip()
 DRY_RUN = os.getenv("DRY_RUN", "").strip().lower() == "true"
+MODALITA = (os.getenv("MODALITA", "").strip().lower() or "aggiungi")
+try:
+    TEMPO_MAX_MINUTI = float(os.getenv("TEMPO_MAX_MINUTI", "").strip() or 110)
+except ValueError:
+    TEMPO_MAX_MINUTI = 110.0
 
 NOTION_HEADERS = {
     "Authorization": f"Bearer {NOTION_TOKEN}",
@@ -55,8 +114,10 @@ NOTION_HEADERS = {
 COLUMNS = {
     "p1": ["Player 1"],
     "noc1": ["NOC 1"],
+    "id1": ["ID BWF 1"],          # novità 2.0
     "p2": ["Player 2"],
     "noc2": ["NOC 2"],
+    "id2": ["ID BWF 2"],          # novità 2.0
     "gender": ["Gender"],
     "discipline": ["Disciplina"],
     "score": ["Score"],
@@ -78,14 +139,24 @@ ROUNDS = {
     "Final": "Final",
     "F": "Final",
 }
+# Gironi delle World Tour Finals: sul sito drawName = "MS - Group A", roundName = "R1", "R2", "R3"
+GIRONE = "Group Stage"
+DISCIPLINE = ["MS", "WS", "MD", "WD", "XD"]
 GENDER = {"MS": "Men", "MD": "Men", "WS": "Women", "WD": "Women", "XD": "Mixed"}
 STATUS_IT = {"Retired": "ritiro", "Walkover": "walkover", "Disqualified": "squalifica",
              "No Match": "non disputato"}
+
+INIZIO = time.monotonic()     # per il limite di tempo
 
 
 def die(msg):
     print(f"ERRORE: {msg}")
     sys.exit(1)
+
+
+def tempo_scaduto():
+    """True se sono passati più di TEMPO_MAX_MINUTI dall'avvio dello script."""
+    return (time.monotonic() - INIZIO) / 60 > TEMPO_MAX_MINUTI
 
 
 # ------------------------------------------------------------- sito BWF
@@ -103,17 +174,31 @@ def bwf(path, params):
             time.sleep(5)
 
 
+def categoria_di(t):
+    """Valore di "Categoria" in Notion per un torneo del calendario BWF (None = torneo da saltare)."""
+    nome_cat = (t.get("category") or "").replace("–", "-").replace("—", "-")
+    nome_cat = re.sub(r"\s+", " ", nome_cat).strip()        # "Grade 1 – Individual…" -> "Grade 1 - Individual…"
+    cat = CATEGORIE.get(nome_cat)
+    if cat == "Mondiali":
+        nome = (t.get("name") or "").lower()
+        if PAROLE_MONDIALI not in nome or any(p in nome for p in PAROLE_ESCLUSE):
+            return None                                     # altri eventi di Grade 1 (es. Mondiali over)
+    return cat
+
+
 def tournaments_of_year(year):
-    """Tornei Super 300 e Super 500 dell'anno, in ordine di data."""
+    """Tornei dell'anno nelle categorie scelte, in ordine di data."""
     params = [("startDate", f"{year}-01-01"), ("endDate", f"{year}-12-31"),
               ("page", 1), ("perPage", 100), ("drawCount", 1), ("activeTab", 1)]
-    params += [("category[]", c) for c in CATEGORIE]
+    params += [("category[]", c) for c in CODICI_CATEGORIA]
     data = bwf("/vue-tournaments-search", params)
     out = []
     for t in data.get("results", {}).get("data", []):
-        cat = next((v for v in CATEGORIE.values() if v in (t.get("category") or "")), None)
+        cat = categoria_di(t)
         if not cat or not t.get("code"):
             continue
+        # Stato del torneo: "normal", "finished", ... Annullato solo se "cancel" compare nello stato
+        # o nel nome (la versione 1.0 scartava tutto ciò che non era "normal", anche "finished").
         status = ((t.get("status") or {}).get("code") or "normal").lower()
         out.append({
             "id": t["id"],
@@ -125,7 +210,8 @@ def tournaments_of_year(year):
             "location": t.get("location") or "",
             "country": t.get("country") or "",
             "url": t.get("url") or "",
-            "cancelled": status != "normal" or "cancel" in t["name"].lower(),
+            "status": status,
+            "cancelled": "cancel" in status or "cancel" in t["name"].lower(),
         })
     return sorted(out, key=lambda t: t["start"])
 
@@ -139,6 +225,12 @@ def days(t, today):
 
 
 def team(side):
+    """Nomi, NOC e codice BWF di un lato dell'incontro (giocatore o coppia).
+
+    Codice BWF: nel singolo il codice del giocatore (es. "65267"); nel doppio i due codici
+    in ordine crescente separati da "/" (es. "65267/89426"). Vuoto se il sito non dà il
+    codice di tutti i giocatori.
+    """
     players = side.get("players") or []
     names = " / ".join(p.get("nameDisplay", "").strip() for p in players)
     codes = []
@@ -147,16 +239,27 @@ def team(side):
         if c and c not in codes:
             codes.append(c)
     noc = (side.get("countryCode") or "").strip() or "/".join(codes)
-    return names, noc
+    ids = [str(p.get("id") or "").strip() for p in players]
+    if players and all(ids):
+        ids.sort(key=lambda x: (len(x), x))      # ordine numerico anche se i codici sono testo
+        bwf_id = "/".join(ids)
+    else:
+        bwf_id = ""
+    return names, noc, bwf_id
 
 
 def parse_match(m, t):
     """Trasforma un incontro del sito in una riga per Notion (None se va saltato)."""
     if m.get("matchStatus") != "F" or m.get("isTeamMatch"):
-        return None                                   # non concluso
-    if "qual" in (m.get("drawName") or "").lower() or (m.get("roundName") or "").lower().startswith("qual"):
+        return None                                   # non concluso, oppure gara a squadre
+    draw = (m.get("drawName") or "")
+    round_name = m.get("roundName") or ""
+    if "qual" in draw.lower() or round_name.lower().startswith("qual"):
         return None                                   # qualificazioni
-    rnd = ROUNDS.get(m.get("roundName"))
+    if "group" in draw.lower():
+        rnd = GIRONE                                  # gironi delle World Tour Finals (R1, R2, R3)
+    else:
+        rnd = ROUNDS.get(round_name)
     disc = (m.get("eventName") or "").upper()
     if not rnd or disc not in GENDER:
         return None
@@ -181,8 +284,10 @@ def parse_match(m, t):
         score = STATUS_IT.get(status, status.lower()) + (f" ({games})" if games else "")
     day = (m.get("matchTime") or "")[:10]
     return {
-        "id": f"BWF|{t['id']}|{disc}|{m.get('roundName')}|{m.get('id')}",
-        "p1": home[0], "noc1": home[1], "p2": away[0], "noc2": away[1],
+        # ID univoco invariato rispetto alla 1.0 (per i gironi roundName è "R1", "R2", "R3")
+        "id": f"BWF|{t['id']}|{disc}|{round_name}|{m.get('id')}",
+        "p1": home[0], "noc1": home[1], "id1": home[2],
+        "p2": away[0], "noc2": away[1], "id2": away[2],
         "gender": GENDER[disc], "discipline": disc, "score": score, "round": rnd,
         "tournament": t["name"].replace(",", " "), "category": t["category"], "date": day,
         "source": (t["url"].rstrip("/") + "/results/" + day) if t["url"] and day else t["url"],
@@ -247,22 +352,66 @@ def plain(prop):
     return ""
 
 
+def fette_di_lettura(mapping):
+    """Le ricerche in cui è divisa la lettura del database: [(etichetta, filtro), ...].
+
+    - 5 ricerche, una per Disciplina (MS, WS, MD, WD, XD): circa 900 righe l'una per stagione,
+      quindi lontane dal limite di 10.000 righe fino al 2028 e oltre;
+    - 1 ricerca "di controllo" per le righe con Disciplina vuota o scritta in modo diverso.
+      Di norma trova 0 righe, ma garantisce che nessuna riga resti fuori.
+    Una pagina trovata da due ricerche viene contata una volta sola.
+    """
+    nome, tipo = mapping["discipline"]
+    fette = [(d, {"property": nome, tipo: {"equals": d}}) for d in DISCIPLINE]
+    altre = {"or": [
+        {"property": nome, tipo: {"is_empty": True}},
+        {"and": [{"property": nome, tipo: {"does_not_equal": d}} for d in DISCIPLINE]},
+    ]}
+    fette.append(("altre (Disciplina vuota o diversa)", altre))
+    return fette
+
+
 def existing_rows(mapping):
-    """Tutte le righe già presenti nel database (servono anche per la pagina web)."""
-    rows, cursor = [], None
-    while True:
-        body = {"page_size": 100}
-        if cursor:
-            body["start_cursor"] = cursor
-        data = notion("POST", f"/databases/{DATABASE_ID}/query", json=body)
-        for page in data["results"]:
-            p = page["properties"]
-            row = {key: plain(p.get(name, {})) for key, (name, _) in mapping.items() if key != "title"}
-            if row.get("id"):
-                rows.append(row)
-        if not data.get("has_more"):
-            return rows
-        cursor = data["next_cursor"]
+    """Tutte le righe già presenti nel database (servono anche per la pagina web).
+
+    Versione 2.0: lettura divisa in 6 ricerche (fette_di_lettura). Se una ricerca arriva
+    a 10.000 righe lo script si ferma, anche in prova: oltre il limite non vedrebbe le altre
+    righe e scriverebbe DOPPIONI.
+    """
+    rows, viste, conteggi, senza_id = [], set(), [], 0
+    for etichetta, filtro in fette_di_lettura(mapping):
+        lette, cursor = 0, None
+        while True:
+            body = {"page_size": 100, "filter": filtro}
+            if cursor:
+                body["start_cursor"] = cursor
+            data = notion("POST", f"/databases/{DATABASE_ID}/query", json=body)
+            for page in data["results"]:
+                lette += 1
+                if page["id"] in viste:          # già letta da un'altra ricerca
+                    continue
+                viste.add(page["id"])
+                p = page["properties"]
+                row = {key: plain(p.get(name, {})) for key, (name, _) in mapping.items() if key != "title"}
+                row["page"] = page["id"]         # serve alla modalità "completa"
+                if row.get("id"):
+                    rows.append(row)
+                else:
+                    senza_id += 1
+            if not data.get("has_more"):
+                break
+            cursor = data["next_cursor"]
+        if lette >= LIMITE_NOTION:
+            die(f"la ricerca '{etichetta}' ha restituito {lette} righe, cioè il limite dell'API Notion: "
+                "alcune righe potrebbero non essere state lette e l'agente scriverebbe DOPPIONI. "
+                "Bisogna dividere ancora la lettura (per esempio Disciplina e anno).")
+        conteggi.append((etichetta, lette))
+    print(f"Righe lette dal db Notion: {len(viste)} in {len(conteggi)} ricerche "
+          f"(la più grande: {max(n for _, n in conteggi)} righe; limite di Notion {LIMITE_NOTION})")
+    print("  " + " · ".join(f"{e} {n}" for e, n in conteggi))
+    if senza_id:
+        print(f"Nota: {senza_id} righe in Notion non hanno 'ID Univoco': lo script le lascia stare.")
+    return rows
 
 
 def notion_value(ptype, value):
@@ -270,7 +419,7 @@ def notion_value(ptype, value):
     if ptype == "title":
         return {"title": [{"text": {"content": value[:2000]}}]}
     if ptype == "rich_text":
-        return {"rich_text": [{"text": {"content": value[:2000]}}]}
+        return {"rich_text": [{"text": {"content": value[:2000]}}] if value else []}
     if ptype == "select":
         return {"select": {"name": value.replace(",", " ")[:100]} if value else None}
     if ptype == "date":
@@ -287,13 +436,31 @@ def create_row(mapping, m):
     notion("POST", "/pages", json={"parent": {"database_id": DATABASE_ID}, "properties": props})
 
 
+def id_da_completare(riga, m):
+    """Le colonne ID BWF da scrivere in una riga già presente: solo quelle VUOTE in Notion
+    per cui il sito dà un codice. Restituisce {"id1": codice, ...} (vuoto = niente da fare)."""
+    return {k: m[k] for k in ("id1", "id2") if not (riga.get(k) or "").strip() and m.get(k)}
+
+
+def completa_riga(mapping, riga, valori):
+    """Scrive in una riga esistente SOLO le colonne ID BWF vuote (regola: nessun dato sovrascritto)."""
+    props = {mapping[k][0]: notion_value(mapping[k][1], v) for k, v in valori.items()}
+    notion("PATCH", f"/pages/{riga['page']}", json={"properties": props})
+
+
 # ---------------------------------------------------------- pagina web
 ROUND_ORDER = {"Final": 0, "Semi Final": 1, "Quarter Final": 2, "Round of 16": 3,
-               "Round of 32": 4, "Round of 64": 5}
+               "Round of 32": 4, "Round of 64": 5, GIRONE: 6}
 
 
 def build_web_data(tournaments, rows, today):
-    """Prepara badminton.json: calendario della stagione + tutti gli incontri."""
+    """Prepara badminton.json: calendario della stagione + tutti gli incontri.
+
+    Versione 2.0: solo le categorie della pagina (CATEGORIE_WEB, oggi Super 300 e 500),
+    così badminton.html continua a funzionare senza modifiche.
+    """
+    tournaments = [t for t in tournaments if t["category"] in CATEGORIE_WEB]
+    rows = [r for r in rows if r.get("category", "") in CATEGORIE_WEB]
     known = {t["name"].replace(",", " "): t for t in tournaments}
     by_name = {}
     for r in rows:
@@ -371,34 +538,57 @@ def publish_web_data(payload):
 
 # --------------------------------------------------------------------- main
 def main():
+    if MODALITA not in ("aggiungi", "completa"):
+        die(f"MODALITA deve essere 'aggiungi' o 'completa' (ricevuto: '{MODALITA}').")
     if not DRY_RUN and (not NOTION_TOKEN or not DATABASE_ID):
         die("mancano NOTION_TOKEN o NOTION_DATABASE_ID (controlla i Secrets su GitHub).")
     today = date.today()
-    mapping, rows = None, []
-    if not DRY_RUN:
-        mapping = read_schema()
-        rows = existing_rows(mapping)
-        print(f"Righe già presenti in Notion: {len(rows)}")
-    else:
-        print("MODALITÀ PROVA: non scrivo nulla su Notion né sulla pagina web.")
-    done = {r["id"] for r in rows}
+    print(f"Agente Badminton 2.0 · modalità {MODALITA}" + (" · PROVA: non scrivo nulla" if DRY_RUN else ""))
 
+    # 1. righe già presenti in Notion (in prova solo se ci sono i Secrets; sempre in sola lettura)
+    mapping, rows = None, []
+    if NOTION_TOKEN and DATABASE_ID:
+        mapping = read_schema()
+        rows = existing_rows(mapping)      # si ferma da sola se una ricerca arriva a 10.000 righe
+    else:
+        print("PROVA senza Secrets di Notion: non leggo il database.")
+    done = {r["id"] for r in rows}
+    per_uid = {}                           # ID Univoco -> righe Notion con quell'ID (di solito una)
+    for r in rows:
+        per_uid.setdefault(r["id"], []).append(r)
+
+    # 2. calendario dei tornei
     tournaments = []
     for year in range(ANNO_INIZIO, today.year + 1):
         try:
             tournaments += tournaments_of_year(year)
         except requests.RequestException as e:
             die(f"il sito BWF non risponde per il calendario {year}: {e}")
-    print(f"Tornei Super 300 e 500 in calendario: {len(tournaments)}")
-
-    errors = added = 0
+    per_cat = {}
     for t in tournaments:
+        per_cat[t["category"]] = per_cat.get(t["category"], 0) + 1
+    print(f"Tornei in calendario: {len(tournaments)} ("
+          + ", ".join(f"{c} {n}" for c, n in sorted(per_cat.items())) + ")")
+
+    # 3. tornei uno per uno
+    errors = added = completate = 0
+    da_scrivere = da_completare = 0       # conteggi per la prova
+    fermato = False
+    for t in tournaments:
+        if fermato:
+            break
         if t["cancelled"] or t["start"] > today.isoformat():
             continue
         prefix = f"BWF|{t['id']}|"
         finals = sum(1 for i in done if i.startswith(prefix) and "|Final|" in i)
-        if finals >= 5 and t["end"] < (today - timedelta(days=2)).isoformat():
-            continue                    # torneo già caricato tutto: non lo rileggo
+        concluso = finals >= 5 and t["end"] < (today - timedelta(days=2)).isoformat()
+        if concluso:
+            if MODALITA != "completa":
+                continue                   # torneo già caricato tutto: non lo rileggo
+            # in "completa" lo rileggo solo se qualche sua riga non ha ancora gli ID BWF
+            if not any(i.startswith(prefix) and any(not (r.get("id1") and r.get("id2")) for r in per_uid[i])
+                       for i in per_uid):
+                continue
         print(f"\n{t['category']} · {t['name']} ({t['start']} – {t['end']})")
         try:
             matches = tournament_matches(t, today)
@@ -407,31 +597,71 @@ def main():
             errors += 1
             continue
         new = [m for m in matches if m["id"] not in done]
-        print(f"  Incontri conclusi: {len(matches)}, nuovi: {len(new)}")
+        senza_id = sum(1 for m in matches if not m["id1"] or not m["id2"])
+        vecchie = []                       # (riga Notion, valori da scrivere) per la modalità completa
+        if MODALITA == "completa":
+            for m in matches:
+                for riga in per_uid.get(m["id"], []):
+                    valori = id_da_completare(riga, m)
+                    if valori:
+                        vecchie.append((riga, valori))
+        print(f"  Incontri conclusi: {len(matches)}, nuovi: {len(new)}"
+              + (f", righe a cui aggiungere gli ID BWF: {len(vecchie)}" if MODALITA == "completa" else "")
+              + (f" · ATTENZIONE {senza_id} incontri senza codice BWF" if senza_id else ""))
+
         if DRY_RUN:
             for m in new[:8]:
-                print(f"  [{m['discipline']}] {m['round']} | {m['p1']} ({m['noc1']}) b. "
-                      f"{m['p2']} ({m['noc2']}) | {m['score']} | {m['date']}")
+                print(f"  [{m['discipline']}] {m['round']} | {m['p1']} ({m['noc1']}, {m['id1'] or '—'}) b. "
+                      f"{m['p2']} ({m['noc2']}, {m['id2'] or '—'}) | {m['score']} | {m['date']}")
+            for riga, valori in vecchie[:3]:
+                print(f"  completerei «{riga.get('p1')} vs {riga.get('p2')}»: "
+                      + ", ".join(f"{COLUMNS[k][0]} = {v}" for k, v in valori.items()))
+            da_scrivere += len(new)
+            da_completare += len(vecchie)
             rows += new
             continue
+
         for m in new:
+            if tempo_scaduto():
+                fermato = True
+                break
             try:
                 create_row(mapping, m)
                 done.add(m["id"])
                 rows.append(m)
                 added += 1
-                time.sleep(0.35)
+                time.sleep(PAUSA_NOTION)
             except RuntimeError as e:
                 print(f"  Errore su {m['p1']} vs {m['p2']}: {e}")
                 errors += 1
+        for riga, valori in vecchie:
+            if fermato or tempo_scaduto():
+                fermato = True
+                break
+            try:
+                completa_riga(mapping, riga, valori)
+                riga.update(valori)        # così il torneo non risulta più "da completare"
+                completate += 1
+                time.sleep(PAUSA_NOTION)
+            except RuntimeError as e:
+                print(f"  Errore nel completare «{riga.get('p1')} vs {riga.get('p2')}»: {e}")
+                errors += 1
 
+    # 4. riepilogo e pagina web
     payload = build_web_data(tournaments, rows, today)
     if DRY_RUN:
         with open(MAPPA_FILE, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=1)
-        print(f"\nProva terminata: {len(rows)} incontri trovati (mostrati i primi 8 per torneo).")
+        print(f"\nProva terminata. Righe nuove che scriverei: {da_scrivere}"
+              + (f"; righe a cui aggiungerei gli ID BWF: {da_completare}" if MODALITA == "completa" else "")
+              + f". {MAPPA_FILE} salvato in locale ({len(payload['incontri'])} incontri Super 300/500).")
     else:
-        print(f"\nFatto. Righe aggiunte: {added}. Errori: {errors}.")
+        print(f"\nFatto. Righe aggiunte: {added}."
+              + (f" Righe completate con gli ID BWF: {completate}." if MODALITA == "completa" else "")
+              + f" Errori: {errors}.")
+        if fermato:
+            print(f"Limite di tempo ({TEMPO_MAX_MINUTI:.0f} minuti) raggiunto: mi sono fermato in ordine. "
+                  "Rilancia l'agente con la stessa modalità: riprende da dove si era fermato, senza doppioni.")
         if MAPPA_TOKEN:
             try:
                 publish_web_data(payload)
