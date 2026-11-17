@@ -1,18 +1,31 @@
 name: Agente Badminton
+
+# Repo agente-badminton, file .github/workflows/agente.yml (versione 2.0 del 17/11/2026, scheda 32).
+# Parte in due modi:
+#   - a mano: Actions -> Agente Badminton -> Run workflow (con le scelte qui sotto);
+#   - ogni mattina da cron-job.org, con il corpo {"ref":"main"}: valgono i valori predefiniti,
+#     cioè lancio vero (prova = no) e modalità "aggiungi". Su cron-job.org non serve cambiare nulla.
 on:
-  workflow_dispatch:          # lancio a mano (Actions > Run workflow) o da cron-job.org
+  workflow_dispatch:
     inputs:
       prova:
-        description: "Solo prova (non scrive su Notion né sulla pagina web)"
+        description: "Solo prova (legge BWF e Notion, ma non scrive nulla)"
         type: boolean
         default: false
+      modalita:
+        description: "aggiungi = solo incontri nuovi; completa = in più scrive ID BWF 1 e 2 nelle righe già presenti"
+        type: choice
+        options: ["aggiungi", "completa"]
+        default: "aggiungi"
+
 concurrency:
-  group: agente-badminton     # mai due esecuzioni insieme
+  group: agente-badminton     # mai due esecuzioni insieme: il secondo lancio aspetta il primo
   cancel-in-progress: false
+
 jobs:
   aggiorna:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 130      # lo script smette di scrivere da solo a 110 minuti e chiude in ordine
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -20,9 +33,23 @@ jobs:
           python-version: "3.12"
       - run: pip install -r requirements.txt
       - name: Leggi i risultati BWF e scrivi su Notion
+        # "shell: bash" fa sì che un errore dello script colori di rosso il lancio anche con "tee"
+        shell: bash
         env:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           NOTION_DATABASE_ID: ${{ secrets.NOTION_DATABASE_ID }}
           MAPPA_TOKEN: ${{ secrets.MAPPA_TOKEN }}
           DRY_RUN: ${{ inputs.prova }}
-        run: python scrape.py
+          MODALITA: ${{ inputs.modalita }}
+          TEMPO_MAX_MINUTI: "110"
+        # "tee" scrive il registro a video e, insieme, nel file rapporto_badminton.txt
+        run: python -u scrape.py | tee rapporto_badminton.txt
+      - name: Conserva il rapporto (Artifacts in fondo alla pagina del lancio)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rapporto-badminton
+          path: |
+            rapporto_badminton.txt
+            badminton.json
+          if-no-files-found: ignore
