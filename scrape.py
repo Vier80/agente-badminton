@@ -1,4 +1,4 @@
-"""Agente Badminton · versione 2.0 (17/11/2026, scheda 32)
+"""Agente Badminton · versione 2.1 (18/11/2026, schede 36 e 37)
 
 Legge i risultati dei tornei BWF e li scrive nel database Notion «🏸 Agente Badminton».
 Poi prepara badminton.json per la pagina web badminton.html e lo pubblica sul
@@ -11,22 +11,21 @@ Tornei letti, dalla stagione 2026:
 Esclusi: qualificazioni, gare a squadre, campionati e Giochi continentali, juniores,
 senior (over), para-badminton.
 
-NOVITÀ della versione 2.0:
-  1. nuove categorie: Super 750, Super 1000, World Tour Finals, Mondiali;
-  2. nuove colonne ID BWF 1 (vincitore) e ID BWF 2 (sconfitto) con il codice BWF del giocatore;
-     nei doppi i due codici in ordine crescente, separati da "/" (es. "65267/89426"),
-     così la stessa coppia ha sempre lo stesso codice, in qualunque ordine la dia il sito;
-  3. lettura del database divisa in 6 ricerche (una per Disciplina + una di controllo),
-     perché l'API di Notion non restituisce più di 10.000 righe per ricerca (schede 29 e 30);
-  4. modalità "completa": scrive ID BWF 1 / ID BWF 2 nelle righe già presenti che non li hanno.
-     Solo nelle celle vuote: nessun dato viene sovrascritto o cancellato;
-  5. un torneo con stato "finished" non viene più scambiato per annullato (era il caso
-     dell'All England 2026); annullato = la parola "cancel" nello stato o nel nome;
-  6. la prova (DRY_RUN) legge anche Notion, senza scrivere, e dice quante righe scriverebbe;
-  7. limite di tempo: passati TEMPO_MAX_MINUTI smette di scrivere e chiude in ordine;
-     il lancio successivo riprende da dove si era fermato, senza doppioni.
-La pagina web badminton.html per ora mostra solo Super 300 e 500 (vedi CATEGORIE_WEB):
-il file badminton.json resta quindi identico a prima.
+NOVITÀ della versione 2.1 (solo la parte "pagina web"; Notion funziona come nella 2.0):
+  1. badminton.json contiene tutte e 6 le categorie (prima solo Super 300 e 500);
+  2. per ogni torneo l'agente legge dal sito BWF il TABELLONE UFFICIALE di ogni specialità
+     (ordine delle caselle, teste di serie, passaggi senza gioco, incontri in programma,
+     gironi delle World Tour Finals con la classifica) e lo mette in badminton.json, nella
+     nuova sezione "tabelloni". Il tabellone NON va in Notion (decisione del 18/11/2026);
+  3. i tabelloni dei tornei finiti non vengono riletti ogni giorno: l'agente li riprende dal
+     badminton.json già pubblicato. Rilegge solo i tornei in corso, quelli che iniziano entro
+     7 giorni (il tabellone esce prima dell'inizio) e quelli non ancora salvati;
+  4. nei tornei di badminton.json ci sono anche "id" (il codice BWF del torneo, serve alla
+     pagina per l'ELO a inizio torneo) e "attesi" (quanti incontri avrà il torneo);
+  5. badminton.json può superare 1 MB: per rileggerlo da GitHub si usa la lettura "grezza"
+     (oltre 1 MB l'API di GitHub non restituisce il contenuto nel modo normale);
+  6. un tabellone che non si riesce a leggere NON ferma l'agente: compare un "Avviso" nel
+     registro e si tiene la versione già pubblicata, se c'è.
 
 Variabili (i "Secrets" e gli input di GitHub):
   NOTION_TOKEN        token della connessione Notion (la stessa dello squash)
@@ -49,6 +48,7 @@ from datetime import date, timedelta
 import requests
 
 # ------------------------------------------------------------- impostazioni
+VERSIONE = "2.1"
 ANNO_INIZIO = 2026          # da quale stagione partire
 
 # Codici BWF delle categorie da chiedere al sito (elenco /vue-tournament-categories,
@@ -71,8 +71,18 @@ CATEGORIE = {
 PAROLE_MONDIALI = "world championships"
 PAROLE_ESCLUSE = ("senior", "junior", "para")
 
-# Categorie mostrate dalla pagina badminton.html (per ora solo Super 300 e 500, come prima)
-CATEGORIE_WEB = {"Super 500", "Super 300"}
+# Categorie mostrate dalla pagina badminton.html. Versione 2.1: tutte e 6.
+CATEGORIE_WEB = set(CATEGORIE.values())
+
+# Incontri attesi per torneo quando il tabellone non è disponibile (solo una stima per
+# l'anello della pagina): 5 tabelloni da 32 = 155; Mondiali 5 da 64 = 315;
+# Finals 5 × (2 gironi da 6 incontri + 2 semifinali + finale) = 75.
+ATTESI_PREDEFINITI = {"Mondiali": 315, "World Tour Finals": 75}
+ATTESI_SUPER = 155
+
+# Il tabellone di un torneo esce qualche giorno prima dell'inizio: lo leggo già
+# quando mancano al massimo questi giorni.
+GIORNI_ANTICIPO_TABELLONE = 7
 
 MAPPA_REPO = "vier80/map-q-la28"
 MAPPA_FILE = "badminton.json"
@@ -85,7 +95,7 @@ LIMITE_NOTION = 10000
 
 API = "https://extranet-lv.bwfbadminton.com/api"
 WEB_HEADERS = {
-    "User-Agent": "Mozilla/5.0 (compatible; AgenteBadminton/2.0; uso personale)",
+    "User-Agent": f"Mozilla/5.0 (compatible; AgenteBadminton/{VERSIONE}; uso personale)",
     "Accept": "application/json, text/plain, */*",
     "Origin": "https://bwfworldtour.bwfbadminton.com",
     "Referer": "https://bwfworldtour.bwfbadminton.com/",
@@ -114,10 +124,10 @@ NOTION_HEADERS = {
 COLUMNS = {
     "p1": ["Player 1"],
     "noc1": ["NOC 1"],
-    "id1": ["ID BWF 1"],          # novità 2.0
+    "id1": ["ID BWF 1"],
     "p2": ["Player 2"],
     "noc2": ["NOC 2"],
-    "id2": ["ID BWF 2"],          # novità 2.0
+    "id2": ["ID BWF 2"],
     "gender": ["Gender"],
     "discipline": ["Disciplina"],
     "score": ["Score"],
@@ -147,11 +157,18 @@ STATUS_IT = {"Retired": "ritiro", "Walkover": "walkover", "Disqualified": "squal
              "No Match": "non disputato"}
 
 INIZIO = time.monotonic()     # per il limite di tempo
+AVVISI = []                   # problemi che non fermano l'agente (es. un tabellone non letto)
 
 
 def die(msg):
     print(f"ERRORE: {msg}")
     sys.exit(1)
+
+
+def avviso(msg):
+    """Stampa un avviso e lo ricorda per il riepilogo finale (non fa fallire il lancio)."""
+    AVVISI.append(msg)
+    print(f"  Avviso: {msg}")
 
 
 def tempo_scaduto():
@@ -306,6 +323,244 @@ def tournament_matches(t, today):
     return list(found.values())
 
 
+# ------------------------------------------------------- tabelloni (novità 2.1)
+# Servizi del sito BWF usati dalla pagina «Full Draw» (verificati il 18/11/2026, scheda 36 §3):
+#   /vue-tournament-draws                  elenco dei tabelloni di un torneo
+#   /vue-tournament-draw-data              caselle di un tabellone a eliminazione
+#   /vue-tournament-draw-data-round-robin  un girone delle World Tour Finals
+#
+# Formato di una casella in badminton.json (una lista, per occupare poco spazio):
+#   [colonna, posizione, squadra_a, testa_a, squadra_b, testa_b, vincitore, stato, esito, set, data]
+#   - colonna: 0 = primo turno, 1 = turno dopo, ...; posizione: 0 = in alto;
+#     nei gironi colonna = giornata (R1 = 0, R2 = 1, R3 = 2) e posizione = ordine;
+#   - squadra_a / squadra_b: numero della squadra nell'elenco "squadre" del torneo, -1 se vuota
+#     (passaggio senza gioco, oppure avversario non ancora noto);
+#   - testa_a / testa_b: testa di serie ("1", "3/4"...) oppure "";
+#   - vincitore: 1 = squadra_a, 2 = squadra_b, 0 = non ancora giocato;
+#   - stato: "F" = finito, "N" = da giocare (altri valori del sito copiati così come sono);
+#   - esito: "" (normale), "walkover", "ritiro", "squalifica", "non disputato";
+#   - set: punteggi dal punto di vista di squadra_a, es. "21-10 22-20";
+#   - data: giorno dell'incontro (AAAA-MM-GG) o "".
+CAMPI_CASELLA = ["colonna", "posizione", "squadra_a", "testa_a", "squadra_b", "testa_b",
+                 "vincitore", "stato", "esito", "set", "data"]
+
+
+def tabellone_params(t, extra=None):
+    """Parametri comuni ai servizi dei tabelloni (gli stessi che usa il sito BWF)."""
+    p = {"tmtTab": "draw", "tmtId": t["id"], "tmtType": 0}
+    if extra:
+        p.update(extra)
+    return p
+
+
+class Squadre:
+    """Elenco delle squadre (giocatori o coppie) di un torneo: ognuna una volta sola.
+
+    Ogni squadra è [nome, noc, codice BWF]; nelle caselle si scrive solo il suo numero.
+    """
+
+    def __init__(self):
+        self.lista, self.indice = [], {}
+
+    def numero(self, side):
+        names, noc, bwf_id = team(side or {})
+        names = re.sub(r"\s+", " ", names).strip()       # "SU Li  Yang" -> "SU Li Yang"
+        if not names:
+            return -1                                      # lato vuoto
+        chiave = bwf_id or names
+        if chiave not in self.indice:
+            self.indice[chiave] = len(self.lista)
+            self.lista.append([names, noc, bwf_id])
+        return self.indice[chiave]
+
+
+def set_testo(m):
+    """Punteggio dei set dal punto di vista di team1 (squadra_a), es. "21-10 22-20"."""
+    return " ".join(f"{s.get('home')}-{s.get('away')}" for s in (m.get("score") or [])
+                    if s.get("home") is not None and s.get("away") is not None)
+
+
+def casella(col, pos, m, squadre):
+    """Una casella del tabellone nel formato compatto di badminton.json (vedi CAMPI_CASELLA)."""
+    w = m.get("winner") if m.get("winner") in (1, 2) else 0
+    stato = (m.get("matchStatus") or "N").strip() or "N"
+    esito = STATUS_IT.get(m.get("scoreStatusValue") or "Normal", "")
+    return [col, pos,
+            squadre.numero(m.get("team1")), str(m.get("team1seed") or "").strip(),
+            squadre.numero(m.get("team2")), str(m.get("team2seed") or "").strip(),
+            w, stato, esito if stato == "F" else "", set_testo(m), (m.get("matchTime") or "")[:10]]
+
+
+def completa_teste(caselle):
+    """Le caselle dei turni non ancora giocati spesso non hanno la testa di serie: la riprendo
+    dalle altre caselle dello stesso tabellone, dove la stessa squadra compare con la testa."""
+    teste = {}
+    for c in caselle:
+        for i_sq, i_ts in ((2, 3), (4, 5)):
+            if c[i_sq] >= 0 and c[i_ts]:
+                teste[c[i_sq]] = c[i_ts]
+    for c in caselle:
+        for i_sq, i_ts in ((2, 3), (4, 5)):
+            if c[i_sq] >= 0 and not c[i_ts]:
+                c[i_ts] = teste.get(c[i_sq], "")
+
+
+def nomi_turni(caselle):
+    """Nome del turno di ogni colonna (R32, R16, QF, SF, Final...), preso dalle caselle."""
+    per_col = {}
+    for c, rn in caselle:
+        if rn and c not in per_col:
+            per_col[c] = rn
+    return [per_col.get(i, "") for i in range(max(per_col) + 1)] if per_col else []
+
+
+def leggi_eliminazione(t, draw_id, squadre):
+    """Tabellone a eliminazione diretta: caselle nell'ordine ufficiale del sito."""
+    data = bwf("/vue-tournament-draw-data", tabellone_params(t, {"drawId": draw_id, "isPara": 0}))
+    risultati = data.get("results") or {}
+    if not isinstance(risultati, dict) or not risultati:
+        raise ValueError("tabellone vuoto")
+    caselle, turni = [], []
+    for chiave, valore in risultati.items():
+        parti = str(chiave).split("-")
+        if len(parti) != 2 or not all(p.isdigit() for p in parti):
+            continue                                       # chiave inattesa: la salto
+        col, pos = int(parti[0]), int(parti[1])
+        m = (valore or {}).get("match") or {}
+        caselle.append(casella(col, pos, m, squadre))
+        turni.append((col, m.get("roundName") or ""))
+    caselle.sort(key=lambda c: (c[0], c[1]))
+    completa_teste(caselle)
+    primo_turno = sum(1 for c in caselle if c[0] == 0)
+    return {"tipo": "E", "misura": primo_turno * 2, "turni": nomi_turni(turni), "c": caselle}
+
+
+def leggi_girone(t, draw_id, nome, squadre):
+    """Un girone delle World Tour Finals: incontri e classifica."""
+    data = bwf("/vue-tournament-draw-data-round-robin",
+               tabellone_params(t, {"drawId": draw_id, "isPara": 0}))
+    caselle, contatore = [], {}
+    for m in data.get("results") or []:
+        rn = m.get("roundName") or ""
+        giornata = int(rn[1:]) - 1 if re.fullmatch(r"R\d+", rn) else 0
+        pos = contatore.get(giornata, 0)
+        contatore[giornata] = pos + 1
+        caselle.append(casella(giornata, pos, m, squadre))
+    caselle.sort(key=lambda c: (c[0], c[1]))
+    completa_teste(caselle)
+    classifica = []
+    for s in data.get("standings") or []:
+        # [posizione, squadra, giocati, vinti, persi, set vinti, set persi, punti fatti, punti subiti]
+        classifica.append([s.get("rank") or 0, squadre.numero(s.get("team")),
+                           s.get("played") or 0, s.get("won") or 0, s.get("lost") or 0,
+                           s.get("game_for") or 0, s.get("game_against") or 0,
+                           s.get("point_for") or 0, s.get("point_against") or 0])
+    nome = nome.split(" - ", 1)[1] if " - " in nome else nome     # "MS - Group A" -> "Group A"
+    return {"nome": nome, "classifica": classifica, "c": caselle}
+
+
+def leggi_tabelloni(t):
+    """Tutti i tabelloni principali di un torneo (qualificazioni escluse).
+
+    Restituisce {"id", "completo", "squadre", "spec": {"MS": {...}, ...}}.
+    - Tabellone a eliminazione: {"tipo": "E", "misura", "turni", "c"}.
+    - World Tour Finals: {"tipo": "G", "gironi": [...], "misura", "turni", "c"}
+      ("c" = semifinali e finale).
+    """
+    elenco = bwf("/vue-tournament-draws", tabellone_params(t)).get("results") or []
+    squadre, spec = Squadre(), {}
+    for d in elenco:
+        testo = (d.get("text") or "").strip()
+        disc = testo.split(" - ")[0].strip().upper()
+        if disc not in DISCIPLINE:
+            continue
+        gruppo = d.get("type") == 1 or "group" in testo.lower()
+        # Qualificazioni: stage "Qualifying", tipo 5 o "qual" nel nome. Attenzione: i gironi
+        # delle Finals hanno qualification = 1 ma NON sono qualificazioni.
+        if not gruppo and (d.get("type") == 5 or "qual" in testo.lower()
+                           or (d.get("stage_name") or "").lower().startswith("qualif")):
+            continue
+        voce = spec.setdefault(disc, {"tipo": "E"})
+        if gruppo:
+            voce["tipo"] = "G"
+            voce.setdefault("gironi", []).append(leggi_girone(t, d.get("value"), testo, squadre))
+        else:
+            if "c" in voce:
+                avviso(f"{t['name']}: due tabelloni a eliminazione per {disc}, tengo il primo")
+                continue
+            voce.update({k: v for k, v in leggi_eliminazione(t, d.get("value"), squadre).items()
+                         if k != "tipo"})
+    for voce in spec.values():
+        voce.setdefault("c", [])
+        voce.setdefault("misura", 0)
+        voce.setdefault("turni", [])
+        if voce["tipo"] == "G":
+            voce["gironi"].sort(key=lambda g: g["nome"])
+    if not spec:
+        raise ValueError("nessun tabellone principale pubblicato")
+    tutte = [c for v in spec.values() for c in v["c"] + [c for g in v.get("gironi", []) for c in g["c"]]]
+    completo = bool(tutte) and all(c[7] == "F" for c in tutte) and len(spec) == len(DISCIPLINE)
+    return {"id": t["id"], "completo": completo, "squadre": squadre.lista,
+            "spec": {d: spec[d] for d in DISCIPLINE if d in spec}}
+
+
+def incontri_attesi(tab, categoria):
+    """Quanti incontri avrà il torneo: caselle del tabellone tolti i passaggi senza gioco."""
+    if not tab:
+        return ATTESI_PREDEFINITI.get(categoria, ATTESI_SUPER)
+    n = 0
+    for v in tab["spec"].values():
+        for c in v["c"] + [c for g in v.get("gironi", []) for c in g["c"]]:
+            passaggio = c[7] == "F" and (c[2] < 0 or c[4] < 0)
+            if not passaggio:
+                n += 1
+    return n
+
+
+def tabelloni_aggiornati(tournaments, vecchi, today):
+    """Tabelloni da mettere in badminton.json, per nome del torneo.
+
+    Rilegge dal sito BWF solo ciò che può essere cambiato; il resto lo riprende da `vecchi`
+    (la sezione "tabelloni" del badminton.json già pubblicato).
+    """
+    nuovi, letti, ripresi = {}, 0, 0
+    limite = (today + timedelta(days=GIORNI_ANTICIPO_TABELLONE)).isoformat()
+    print("\nTabelloni ufficiali (ordine e teste di serie):")
+    for t in tournaments:
+        if t["category"] not in CATEGORIE_WEB or t["cancelled"] or t["start"] > limite:
+            continue
+        nome = t["name"].replace(",", " ")
+        vecchio = vecchi.get(nome) if isinstance(vecchi, dict) else None
+        if vecchio and vecchio.get("completo") and vecchio.get("id") == t["id"]:
+            nuovi[nome] = vecchio                  # torneo finito e già salvato: non lo rileggo
+            ripresi += 1
+            continue
+        if tempo_scaduto():
+            if vecchio:
+                nuovi[nome] = vecchio
+            avviso(f"{nome}: tabellone non riletto per il limite di tempo")
+            continue
+        try:
+            nuovi[nome] = leggi_tabelloni(t)
+            letti += 1
+            # Finito da più di 3 giorni: lo considero chiuso anche se qualche casella del sito
+            # è rimasta "da giocare" (es. un ritiro registrato male), così non lo rileggo ogni giorno.
+            if t["end"] < (today - timedelta(days=3)).isoformat():
+                nuovi[nome]["completo"] = True
+            spec = nuovi[nome]["spec"]
+            print(f"  {nome}: " + ", ".join(
+                f"{d} {'gironi + ' if v['tipo'] == 'G' else ''}{v['misura']}" for d, v in spec.items()))
+        except (requests.RequestException, ValueError, KeyError, TypeError) as e:
+            if vecchio:
+                nuovi[nome] = vecchio
+            if t["start"] <= today.isoformat():
+                avviso(f"{nome}: tabellone non letto ({e})" + ("; tengo quello già pubblicato" if vecchio else ""))
+            else:
+                print(f"  {nome}: tabellone non ancora pubblicato")
+    print(f"  Letti dal sito: {letti}; ripresi da badminton.json già pubblicato: {ripresi}")
+    return nuovi
+
+
 # ------------------------------------------------------------------- Notion
 def notion(method, path, **kwargs):
     r = None
@@ -374,9 +629,9 @@ def fette_di_lettura(mapping):
 def existing_rows(mapping):
     """Tutte le righe già presenti nel database (servono anche per la pagina web).
 
-    Versione 2.0: lettura divisa in 6 ricerche (fette_di_lettura). Se una ricerca arriva
-    a 10.000 righe lo script si ferma, anche in prova: oltre il limite non vedrebbe le altre
-    righe e scriverebbe DOPPIONI.
+    Lettura divisa in 6 ricerche (fette_di_lettura). Se una ricerca arriva a 10.000 righe
+    lo script si ferma, anche in prova: oltre il limite non vedrebbe le altre righe e
+    scriverebbe DOPPIONI.
     """
     rows, viste, conteggi, senza_id = [], set(), [], 0
     for etichetta, filtro in fette_di_lettura(mapping):
@@ -453,12 +708,43 @@ ROUND_ORDER = {"Final": 0, "Semi Final": 1, "Quarter Final": 2, "Round of 16": 3
                "Round of 32": 4, "Round of 64": 5, GIRONE: 6}
 
 
-def build_web_data(tournaments, rows, today):
-    """Prepara badminton.json: calendario della stagione + tutti gli incontri.
+def gh_headers(accept="application/vnd.github+json"):
+    """Intestazioni per l'API di GitHub (senza MAPPA_TOKEN si legge lo stesso: il repo è pubblico)."""
+    h = {"Accept": accept, "X-GitHub-Api-Version": "2022-11-28"}
+    if MAPPA_TOKEN:
+        h["Authorization"] = f"Bearer {MAPPA_TOKEN}"
+    return h
 
-    Versione 2.0: solo le categorie della pagina (CATEGORIE_WEB, oggi Super 300 e 500),
-    così badminton.html continua a funzionare senza modifiche.
+
+def leggi_json_pubblicato():
+    """Il badminton.json già pubblicato su map-q-la28: (sha, contenuto) oppure (None, None).
+
+    Novità 2.1: il file può superare 1 MB, e oltre 1 MB l'API di GitHub non manda il contenuto
+    nel modo normale. Quindi: prima chiedo lo "sha" (serve per sovrascrivere il file), poi il
+    contenuto in versione "grezza" (raw), che funziona fino a 100 MB.
     """
+    url = f"https://api.github.com/repos/{MAPPA_REPO}/contents/{MAPPA_FILE}"
+    r = requests.get(url, headers=gh_headers(), timeout=30)
+    if r.status_code == 404:
+        return None, None
+    if r.status_code != 200:
+        raise RuntimeError(f"GitHub ha risposto {r.status_code}: {r.text[:300]}")
+    sha = r.json().get("sha")
+    r = requests.get(url, headers=gh_headers("application/vnd.github.raw+json"), timeout=60)
+    if r.status_code != 200:
+        raise RuntimeError(f"GitHub non dà il contenuto di {MAPPA_FILE}: {r.status_code}")
+    try:
+        return sha, json.loads(r.content.decode("utf-8"))
+    except ValueError:
+        return sha, None
+
+
+def build_web_data(tournaments, rows, today, tabelloni=None):
+    """Prepara badminton.json: calendario della stagione + tutti gli incontri + tabelloni.
+
+    Versione 2.1: tutte le categorie di CATEGORIE_WEB (6) e la sezione "tabelloni".
+    """
+    tabelloni = tabelloni or {}
     tournaments = [t for t in tournaments if t["category"] in CATEGORIE_WEB]
     rows = [r for r in rows if r.get("category", "") in CATEGORIE_WEB]
     known = {t["name"].replace(",", " "): t for t in tournaments}
@@ -478,45 +764,40 @@ def build_web_data(tournaments, rows, today):
             stato = "in corso"
         else:
             stato = "concluso"
-        tornei.append({"nome": key, "categoria": t["category"], "inizio": t["start"], "fine": t["end"],
-                       "luogo": t["location"], "url": t["url"], "stato": stato, "incontri": n})
+        tornei.append({"nome": key, "id": t["id"], "categoria": t["category"], "inizio": t["start"],
+                       "fine": t["end"], "luogo": t["location"], "url": t["url"], "stato": stato,
+                       "incontri": n, "attesi": incontri_attesi(tabelloni.get(key), t["category"])})
     for name, rs in by_name.items():           # tornei in Notion ma non più nel calendario
         if name not in known:
             ds = sorted(r.get("date", "") for r in rs if r.get("date"))
-            tornei.append({"nome": name, "categoria": rs[0].get("category", ""), "inizio": ds[0] if ds else "",
+            cat = rs[0].get("category", "")
+            tornei.append({"nome": name, "categoria": cat, "inizio": ds[0] if ds else "",
                            "fine": ds[-1] if ds else "", "luogo": "", "url": "", "stato": "concluso",
-                           "incontri": len(rs)})
+                           "incontri": len(rs), "attesi": incontri_attesi(tabelloni.get(name), cat)})
     tornei.sort(key=lambda t: (t["inizio"], t["nome"]))
     incontri = [[r.get("tournament", ""), r.get("discipline", ""), r.get("round", ""),
                  r.get("p1", ""), r.get("noc1", ""), r.get("p2", ""), r.get("noc2", ""),
                  r.get("score", ""), r.get("date", "")] for r in rows]
     incontri.sort(key=lambda x: (x[0], x[1], ROUND_ORDER.get(x[2], 9), x[8], x[3]))
+    nomi = {t["nome"] for t in tornei}
     return {
         "aggiornato": today.isoformat(),
+        "versione": VERSIONE,
         "stagioni": sorted({t["inizio"][:4] for t in tornei if t["inizio"]}),
         "campi": ["torneo", "disciplina", "turno", "vincitore", "noc_vincitore",
                   "sconfitto", "noc_sconfitto", "punteggio", "data"],
         "tornei": tornei,
         "incontri": incontri,
+        "campi_casella": CAMPI_CASELLA,
+        "tabelloni": {k: v for k, v in sorted(tabelloni.items()) if k in nomi},
     }
 
 
 def publish_web_data(payload):
     """Scrive badminton.json su map-q-la28 e fa ripartire la pubblicazione della pagina."""
-    gh = {"Authorization": f"Bearer {MAPPA_TOKEN}", "Accept": "application/vnd.github+json",
-          "X-GitHub-Api-Version": "2022-11-28"}
     url = f"https://api.github.com/repos/{MAPPA_REPO}/contents/{MAPPA_FILE}"
     text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-    r = requests.get(url, headers=gh, timeout=30)
-    sha, old = None, None
-    if r.status_code == 200:
-        sha = r.json()["sha"]
-        try:
-            old = json.loads(base64.b64decode(r.json()["content"]).decode("utf-8"))
-        except ValueError:
-            old = None
-    elif r.status_code != 404:
-        raise RuntimeError(f"GitHub ha risposto {r.status_code}: {r.text[:300]}")
+    sha, old = leggi_json_pubblicato()
     if old and {**old, "aggiornato": ""} == {**payload, "aggiornato": ""}:
         print("Pagina web: nessuna novità, non la ripubblico.")
         return
@@ -524,16 +805,16 @@ def publish_web_data(payload):
             "content": base64.b64encode(text.encode("utf-8")).decode("ascii")}
     if sha:
         body["sha"] = sha
-    r = requests.put(url, headers=gh, json=body, timeout=60)
+    r = requests.put(url, headers=gh_headers(), json=body, timeout=120)
     if not r.ok:
         raise RuntimeError(f"GitHub non accetta {MAPPA_FILE}: {r.status_code} {r.text[:300]}")
     r = requests.post(f"https://api.github.com/repos/{MAPPA_REPO}/actions/workflows/{MAPPA_WORKFLOW}/dispatches",
-                      headers=gh, json={"ref": "main"}, timeout=30)
+                      headers=gh_headers(), json={"ref": "main"}, timeout=30)
     if r.status_code != 204:
         print(f"  Attenzione: {MAPPA_FILE} salvato, ma la ripubblicazione non è partita ({r.status_code}). "
               "Lancia a mano «Aggiorna mappa LA28» su map-q-la28.")
     else:
-        print(f"Pagina web: {MAPPA_FILE} aggiornato, ripubblicazione avviata.")
+        print(f"Pagina web: {MAPPA_FILE} aggiornato ({len(text) // 1024} KB), ripubblicazione avviata.")
 
 
 # --------------------------------------------------------------------- main
@@ -543,7 +824,7 @@ def main():
     if not DRY_RUN and (not NOTION_TOKEN or not DATABASE_ID):
         die("mancano NOTION_TOKEN o NOTION_DATABASE_ID (controlla i Secrets su GitHub).")
     today = date.today()
-    print(f"Agente Badminton 2.0 · modalità {MODALITA}" + (" · PROVA: non scrivo nulla" if DRY_RUN else ""))
+    print(f"Agente Badminton {VERSIONE} · modalità {MODALITA}" + (" · PROVA: non scrivo nulla" if DRY_RUN else ""))
 
     # 1. righe già presenti in Notion (in prova solo se ci sono i Secrets; sempre in sola lettura)
     mapping, rows = None, []
@@ -570,7 +851,7 @@ def main():
     print(f"Tornei in calendario: {len(tournaments)} ("
           + ", ".join(f"{c} {n}" for c, n in sorted(per_cat.items())) + ")")
 
-    # 3. tornei uno per uno
+    # 3. tornei uno per uno (risultati -> Notion)
     errors = added = completate = 0
     da_scrivere = da_completare = 0       # conteggi per la prova
     fermato = False
@@ -647,14 +928,25 @@ def main():
                 print(f"  Errore nel completare «{riga.get('p1')} vs {riga.get('p2')}»: {e}")
                 errors += 1
 
-    # 4. riepilogo e pagina web
-    payload = build_web_data(tournaments, rows, today)
+    # 4. tabelloni ufficiali (novità 2.1): dal sito BWF solo quelli che possono essere cambiati,
+    #    gli altri dal badminton.json già pubblicato
+    try:
+        _, pubblicato = leggi_json_pubblicato()
+    except (RuntimeError, requests.RequestException) as e:
+        pubblicato = None
+        avviso(f"non riesco a rileggere {MAPPA_FILE} da GitHub ({e}): rileggo tutti i tabelloni")
+    vecchi = (pubblicato or {}).get("tabelloni") or {}
+    tabelloni = tabelloni_aggiornati(tournaments, vecchi, today)
+
+    # 5. riepilogo e pagina web
+    payload = build_web_data(tournaments, rows, today, tabelloni)
     if DRY_RUN:
         with open(MAPPA_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, indent=1)
+            json.dump(payload, f, ensure_ascii=False, separators=(",", ":"))
         print(f"\nProva terminata. Righe nuove che scriverei: {da_scrivere}"
               + (f"; righe a cui aggiungerei gli ID BWF: {da_completare}" if MODALITA == "completa" else "")
-              + f". {MAPPA_FILE} salvato in locale ({len(payload['incontri'])} incontri Super 300/500).")
+              + f". {MAPPA_FILE} salvato in locale ({len(payload['incontri'])} incontri, "
+              f"{len(payload['tabelloni'])} tornei con tabellone).")
     else:
         print(f"\nFatto. Righe aggiunte: {added}."
               + (f" Righe completate con gli ID BWF: {completate}." if MODALITA == "completa" else "")
@@ -670,6 +962,10 @@ def main():
                 errors += 1
         else:
             print("Pagina web: manca MAPPA_TOKEN, non la aggiorno.")
+    if AVVISI:
+        print(f"\nAvvisi ({len(AVVISI)}), non bloccanti:")
+        for a in AVVISI:
+            print(f"  - {a}")
     if errors:
         sys.exit(1)
 
